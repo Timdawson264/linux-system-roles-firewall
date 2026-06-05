@@ -272,6 +272,13 @@ options:
     type: str
     choices: ["replaced", "kept"]
     default: "kept"
+  ignore_policies:
+    description:
+      When this option is true and previous=replaced, the module will not delete policy xml files.
+      so they can be managed declarativly in another role.
+    required: false
+    type: bool
+    default: false
   includes:
     description:
       Services to include in this one.
@@ -1448,6 +1455,7 @@ class InMemoryBackend:
         module,
         online,
         start_empty=False,
+        ignore_policies=False,
     ):
         self.module = module
         self.online = online
@@ -1458,9 +1466,10 @@ class InMemoryBackend:
         self.timeout = None
         self.changed = False
         self.set_interface_changed = False
+        self.ignore_policies = ignore_policies
 
         # Load the current configuration
-        self.original_config = config_to_dict(module, detailed=True, online=online)
+        self.original_config = config_to_dict(module, detailed=True, online=online, ignore_policies=ignore_policies)
         self.firewalld_conf = copy.deepcopy(
             self.original_config.get("firewalld_conf", {})
         )
@@ -2881,6 +2890,7 @@ def get_base_argument_spec():
         destination=dict(required=False, type="list", elements="str", default=[]),
         includes=dict(required=False, type="list", elements="str", default=[]),
         previous=dict(required=False, choices=["replaced", "kept"], default="kept"),
+        ignore_policies=dict(required=False, type="bool", default=False ),
     )
 
 
@@ -3344,10 +3354,14 @@ def get_diffs(
     current_firewalld_conf,
     ignore_interface,
 ):
+    
+    #diff permanent (on disk) configs
     perm_raw = recursive_show_diffs(
         original_permanent, current_permanent, None, ignore_interface=ignore_interface
     )
     diff = {"permanent": _recursive_diff_to_added_removed(perm_raw)}
+
+    #diff runtime configs
     if original_runtime and current_runtime:
         run_raw = recursive_show_diffs(
             original_runtime, current_runtime, None, ignore_interface=ignore_interface
@@ -3356,6 +3370,7 @@ def get_diffs(
         run_raw = None
     diff["runtime"] = _recursive_diff_to_added_removed(run_raw)
 
+    #Diff default_zone and firewalld_conf settings
     if original_default_zone != current_default_zone:
         diff["permanent"]["removed"]["default_zone"] = original_default_zone
         diff["permanent"]["added"]["default_zone"] = current_default_zone
@@ -3379,6 +3394,7 @@ def check_for_diffs(
     warnings,
     config_list,
     replaced,
+    ignore_policies,
     online_param=None,
     __called_from_role_param=None,
 ):
@@ -3398,7 +3414,7 @@ def check_for_diffs(
     # Build the desired config using InMemoryBackend with empty starting config
     # We need to process all configs to build the complete desired state
     online = online_param
-    backend = InMemoryBackend(module, online, start_empty=replaced)
+    backend = InMemoryBackend(module, online, start_empty=replaced, ignore_policies=ignore_policies )
 
     # Build desired config with InMemoryBackend
     for config in config_list:
@@ -3483,6 +3499,7 @@ def process_replaced_config(
     changed,
     need_remove_custom_files,
     online,
+    ignore_policies,
 ):
     # Remove existing firewalld configuration files
     if not module.check_mode and (changed or need_remove_custom_files):
@@ -3512,8 +3529,15 @@ def process_replaced_config(
         # and did not change it - it messes up the fact gathering because it is reported
         # as a customization but it really isn't - in this case we report changed: false
         # because the configuration didn't really change
+        #
+        # If ignore_policies is set we will skip the deletion of the policy objects.
         if changed or need_remove_custom_files:
-            for root, dirs, files in os.walk(FIREWALLD_DIR):
+            for root, _, files in os.walk(FIREWALLD_DIR):
+
+                if ignore_policies and os.path.normpath(root).endswith( "policies" ):
+                    module.debug("Skipping Folder %s" % root )
+                    continue
+
                 for filename in files:
                     if filename.endswith(".xml"):
                         xml_file = os.path.join(root, filename)
@@ -3592,10 +3616,14 @@ def main():
         has_replaced = any(
             config.get("previous") == "replaced" for config in config_list
         )
+        # Pre-scan config_list for ignore_policies=true
+        has_ignore_policies = any(
+            config.get("ignore_policies") == True for config in config_list
+        )
 
-        # Filter out all items with previous (keep items WITHOUT previous)
+        # Filter out all items with previous (keep items WITHOUT previous) or with ignore_policies=True
         filtered_config_list = [
-            config for config in config_list if config.get("previous") != "replaced"
+            config for config in config_list if config.get("previous") != "replaced" or config.get("ignore_policies") == False
         ]
 
         # Validate all configs
@@ -3625,6 +3653,7 @@ def main():
             warnings,
             filtered_config_list,
             has_replaced,
+            has_ignore_policies,
             online_param=online,
             __called_from_role_param=__called_from_role,
         )
@@ -3640,6 +3669,7 @@ def main():
                 changed,
                 need_remove_custom_files or set_interface_changed,
                 online,
+                has_ignore_policies,
             )
 
         if module.check_mode or (not changed and not set_interface_changed):

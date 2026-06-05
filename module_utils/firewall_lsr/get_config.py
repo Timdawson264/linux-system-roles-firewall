@@ -453,7 +453,7 @@ def fetch_settings_using_offline_cmd(module, setting_name):
     return settings
 
 
-def config_to_dict(module, detailed=None, online=None):
+def config_to_dict(module, detailed=None, online=None, ignore_policies=False ):
     if detailed is None:
         detailed = module.params.get("detailed", False)
     if online is None:
@@ -463,7 +463,7 @@ def config_to_dict(module, detailed=None, online=None):
     custom_permanent = {}
     setting_list = ["zones", "services", "icmptypes", "helpers", "ipsets"]
 
-    if HAS_POLICIES:
+    if HAS_POLICIES and ignore_policies == False:
         setting_list.append("policies")
 
     defaults = fetch_settings_from_xml_files(module, setting_list, defaults=True)
